@@ -1,0 +1,318 @@
+# ENTGO BASIC
+
+## QUICK START
+
+### Install `entgql`
+```
+go get entgo.io/contrib/entgql@master
+```
+
+### Add the following [Annotations](https://entgo.io/docs/schema-annotations) to `User` schema
+```go
+func (User) Annotations() []schema.Annotation {
+    return []schema.Annotation{
+        entgql.QueryField(),
+        entgql.Mutations(entgql.MutationCreate(), MutationUpdate()),
+    }
+}
+```
+
+### Create new `ent/entc.go` file with this content
+```go
+//go:build ignore
+
+package main
+
+import (
+	"log"
+
+	"entgo.io/contrib/entgql"
+	"entgo.io/ent/entc"
+	"entgo.io/ent/entc/gen"
+)
+
+func main() {
+	ex, err := entgql.NewExtension(
+		// Tell Ent to generate a GraphQL schema for
+		// the Ent schema in a file named ent.graphql.
+		entgql.WithSchemaGenerator(),
+		entgql.WithSchemaPath("ent.graphql"),
+	)
+	if err != nil {
+		log.Fatalf("creating entgql extension: %v", err)
+	}
+	opts := []entc.Option{
+		entc.Extensions(ex),
+	}
+	if err := entc.Generate("./ent/schema", &gen.Config{}, opts...); err != nil {
+		log.Fatalf("running ent codegen: %v", err)
+	}
+}
+```
+
+### Delete `ent/generate.go` and create new one in root folder with this content
+```
+package todo
+
+//go:generate go run -mod=mod ./ent/entc.go
+```
+
+### Generate Code
+```
+go generate .
+```
+
+### Install `gqlgen` extension
+```
+go get github.com/99designs/gqlgen
+```
+
+### Create new `gqlgen.yml` with this content for configuring `gqlgen` extension
+```yml
+# schema tells gqlgen where the GraphQL schema is located.
+schema:
+  - ent.graphql
+
+# resolver reports where the resolver implementations go.
+resolver:
+  layout: follow-schema
+  dir: .
+
+# gqlgen will search for any type names in the schema in these go packages
+# if they match it will use them, otherwise it will generate them.
+
+# autobind tells gqngen to search for any type names in the GraphQL schema in the
+# provided package. If they match it will use them, otherwise it will generate new.
+autobind:
+  - gqlBasic/ent
+  - gqlBasic/ent/user
+
+# This section declares type mapping between the GraphQL and Go type systems.
+models:
+  # Defines the ID field as Go 'int'.
+  ID:
+    model:
+      - github.com/99designs/gqlgen/graphql.IntID
+  Node:
+    model:
+      - gqlBasic/ent.Noder
+```
+
+### Add the `gqlgen` extension inside `ent/entc.go`
+```go
+    ex, err := entgql.NewExtension(
+        entgql.WithSchemaGenerator(),
+        entgql.WithSchemaPath("ent.graphql"),
+        entgql.WithConfigPath("gqlgen.yml"), // Add this code
+    )
+```
+
+### Add `gqlgen` generate command inside our new `generate.go`
+```
+package todo
+
+//go:generate go run -mod=mod ./ent/entc.go
+//go:generate go run -mod=mod github.com/99designs/gqlgen
+```
+
+### Generate the code again
+```
+go generate .
+```
+This time, there are some extra files that are generated in the root dir by the `gqlgen` extensions
+
+
+## Create GraphQL Server
+
+### Modify `resolver.go`
+```go
+package gqlBasic
+
+import (
+	"gqlBasic/ent"
+
+	"github.com/99designs/gqlgen/graphql"
+)
+
+// Resolver is the resolver root.
+type Resolver struct{ client *ent.Client }
+
+// NewSchema creates a graphql executable schema.
+func NewSchema(client *ent.Client) graphql.ExecutableSchema {
+	return NewExecutableSchema(Config{
+		Resolvers: &Resolver{client},
+	})
+}
+```
+
+### Create new `cmd/gqlBasic/main.go` file with this content
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "net/http"
+
+    "gqlBasic"
+    "gqlBasic/ent"
+    "gqlBasic/ent/migrate"
+
+    "entgo.io/ent/dialect"
+    "github.com/99designs/gqlgen/graphql/handler"
+    "github.com/99designs/gqlgen/graphql/playground"
+
+    _ "github.com/mattn/go-sqlite3"
+)
+
+func main() {
+    // Create ent.Client and run the schema migration.
+    client, err := ent.Open(dialect.SQLite, "file:ent?mode=memory&cache=shared&_fk=1")
+    if err != nil {
+        log.Fatal("opening ent client", err)
+    }
+    if err := client.Schema.Create(
+        context.Background(),
+        migrate.WithGlobalUniqueID(true),
+    ); err != nil {
+        log.Fatal("opening ent client", err)
+    }
+
+    // Configure the server and start listening on :8081.
+    srv := handler.NewDefaultServer(gqlBasic.NewSchema(client))
+    http.Handle("/",
+        playground.Handler("User", "/query"),
+    )
+    http.Handle("/query", srv)
+    log.Println("listening on :8081")
+    if err := http.ListenAndServe(":8081", nil); err != nil {
+        log.Fatal("http server terminated", err)
+    }
+}
+```
+
+### Start the GraphQL server
+```
+go run ./cmd/gqlBasic
+```
+You can now visit the graphQL UI at [http://localhost:8081](http://localhost:8081). Query anything inside the UI will no work yet.
+
+## Finishing
+To intgerate our GraphQL server & EntGo, we need to modify the `.resolvers.go` files and add some `graphql` files.
+
+### Create a new `user.graphql` with this content
+```
+type Mutation {
+    # The input and the output are types generated by Ent.
+    createUser(input: CreateUserInput!): User
+
+    updateUser(id: ID!, input: UpdateUserInput!): User
+}
+```
+
+### Generate the code again
+```
+go generate .
+```
+This will generate a new `resolvers.go` file named `user.resolvers.go`
+
+### Modify `ent.resolvers.go` 
+```go
+// Users is the resolver for the users field.
+func (r *queryResolver) Users(ctx context.Context) ([]*ent.User, error) {
+	return r.client.User.Query().All(ctx)
+}
+```
+
+### Modify `user.resolvers.go`
+```go
+// CreateUser is the resolver for the createUser field.
+func (r *mutationResolver) CreateUser(ctx context.Context, input ent.CreateUserInput) (*ent.User, error) {
+	return r.client.User.Create().SetInput(input).Save(ctx)
+}
+
+// UpdateUser is the resolver for the updateUser field.
+func (r *mutationResolver) UpdateUser(ctx context.Context, id int, input ent.UpdateUserInput) (*ent.User, error) {
+	return nil, r.client.User.UpdateOneID(id).SetInput(input).Exec(ctx)
+}
+```
+
+## DONE!
+You have created a minimal working program with GO, EntGo and GraphQL!
+
+## TEST
+
+### Run the server
+```
+go run .cmd/gqlBasic
+```
+Run the server and go to graphQL UI at [http://localhost:8081](http://localhost:8081)
+
+### Create User
+Inside the playground, run this graphql mutation
+```graphql
+mutation createUser {
+  createUser(input: {name: "yourName", email: "yourEmail@gmail.com"}) {
+    id, 
+    name,
+    email,
+    createdAt
+  }
+}
+
+# Output
+# {
+#   "data": {
+#     "createUser": {
+#       "id": "1",
+#       "name": "yourName",
+#       "email": "yourEmail@gmail.com",
+#       "createdAt": "2023-06-13T18:37:34.5034899+08:00"
+#     }
+#   }
+# }
+```
+This will create a new user 
+
+### Query User 
+```graphql
+query AllUsers {
+  users {
+    id,
+    name,
+    email,
+    createdAt
+  }
+}
+
+# Output
+# {
+#   "data": {
+#     "users": [
+#       {
+#         "id": "1",
+#         "name": "yourName",
+#         "email": "yourEmail@gmail.com",
+#         "createdAt": "2023-06-13T18:37:34.5034899+08:00"
+#       }
+#     ]
+#   }
+# }
+```
+
+### Update User
+```graphql
+mutation updateUser {
+  updateUser(id: 1, input: {name: "updated", email: "updated@gmail.com"}) {
+    name: name,
+    email: email
+  }
+}
+
+# Output
+# {
+#   "data": {
+#     "updateUser": null
+#   }
+# }
+```
