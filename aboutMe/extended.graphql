@@ -1,0 +1,5 @@
+extend input CreateUserInput {
+  createHobbies: [CreateHobbyInput!]
+  
+  createFriends: [CreateUserInput!]
+}
